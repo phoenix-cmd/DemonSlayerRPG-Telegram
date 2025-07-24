@@ -21,7 +21,8 @@ class Player:
     exp: int = 0
     core_type: str = "Stable"
     element: str = "None"
-    
+    path_progress: int = 0         # How far along the current route (0=entry point, max=next region)
+    current_route: str = "" 
     hp: int = 100
     mana: int = 50
     atk: int = 10
@@ -100,7 +101,8 @@ players_collection.insert_one(new_player.to_dict())
 doc = players_collection.find_one({"telegram_id": 123456789})
 player = Player.from_dict(doc)
 """
-
+# models/player.py
+       # Name of the active route/path, e.g., "Tunnel Route"
 # Always use player.to_dict() before saving, and Player.from_dict() when loading from DB.
 
 # --- End of player.py ---
