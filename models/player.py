@@ -1,3 +1,4 @@
+# models/player.py
 
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
@@ -13,7 +14,7 @@ STARTING_STATS = {
 class Player:
     telegram_id: int
     name: str
-    gender: str # 'male' or 'female'
+    gender: str  # 'male' or 'female'
 
     # RPG core fields
     mode: str = "explore"
@@ -21,8 +22,7 @@ class Player:
     exp: int = 0
     core_type: str = "Stable"
     element: str = "None"
-    path_progress: int = 0         # How far along the current route (0=entry point, max=next region)
-    current_route: str = "" 
+    
     hp: int = 100
     mana: int = 50
     atk: int = 10
@@ -35,17 +35,22 @@ class Player:
     alignment: Optional[str] = None
     background: Optional[str] = ""
     quests: List[Dict[str, Any]] = field(default_factory=list)
-    location: str = ""
+    location: str = "Spider's Market"
     region_unlocks: List[str] = field(default_factory=list)
-    inventory: List[Dict[str, Any]] = field(default_factory=list) # Items, gear, etc.
+    inventory: List[Dict[str, Any]] = field(default_factory=list)  # Items, gear, etc.
     equipped: Dict[str, str] = field(default_factory=dict)
     gold: int = 0
     
     created_at: datetime = field(default_factory=datetime.utcnow)
     last_active: datetime = field(default_factory=datetime.utcnow)
 
+    # New Fields for route progression
+    current_route: Optional[str] = None      # e.g., 'Tunnel Route'
+    path_progress: int = 0                   # 0 = at region, >0 = steps along route
+    has_explored: bool = False               # Whether player has explored current step
+
     @classmethod
-    def create_new(cls, telegram_id: int, name: str, gender: str, background: str = "", location: str = "Mount Natagumo") -> "Player":
+    def create_new(cls, telegram_id: int, name: str, gender: str, background: str = "", location: str = "Spider's Market") -> "Player":
         """Factory for a new player with gender-based stats."""
         stats = STARTING_STATS.get(gender.lower())
         if not stats:
@@ -66,43 +71,28 @@ class Player:
 
     def to_dict(self) -> dict:
         """Serialize Player for MongoDB storage."""
-        data = asdict(self)
-        # Datetime fields: explicitly stored as datetime objects (pymongo handles this)
-        return data
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, doc: dict) -> "Player":
         """Create a Player from a MongoDB document."""
         kwargs = dict(doc)
-        # Ensure datetime fields are present/converted correctly
+        # Handle datetime fields conversion if needed
         for dt_field in ("created_at", "last_active"):
-            if isinstance(kwargs.get(dt_field), str):  # If stored as ISO string
-                kwargs[dt_field] = datetime.fromisoformat(kwargs[dt_field])
+            if isinstance(kwargs.get(dt_field), str):
+                try:
+                    from datetime import datetime
+                    kwargs[dt_field] = datetime.fromisoformat(kwargs[dt_field])
+                except Exception:
+                    kwargs[dt_field] = datetime.utcnow()
             elif kwargs.get(dt_field) is None:
                 kwargs[dt_field] = datetime.utcnow()
+        # Provide defaults for new fields if missing
+        if "current_route" not in kwargs:
+            kwargs["current_route"] = None
+        if "path_progress" not in kwargs:
+            kwargs["path_progress"] = 0
+        if "has_explored" not in kwargs:
+            kwargs["has_explored"] = False
         return cls(**kwargs)
 
-# --- Example Usage ---
-
-# Creating a new player (for registration)
-"""
-new_player = Player.create_new(
-    telegram_id=123456789,
-    name="Tanjiro",
-    gender="male",  # or "female"
-    background="A humble villager seeking vengeance.",
-    location="Mount Natagumo"
-)
-players_collection.insert_one(new_player.to_dict())
-"""
-
-# Loading from MongoDB
-"""
-doc = players_collection.find_one({"telegram_id": 123456789})
-player = Player.from_dict(doc)
-"""
-# models/player.py
-       # Name of the active route/path, e.g., "Tunnel Route"
-# Always use player.to_dict() before saving, and Player.from_dict() when loading from DB.
-
-# --- End of player.py ---
