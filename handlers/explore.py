@@ -1,91 +1,125 @@
+# handlers/explore.py
+
+import os
 import random
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from motor.motor_asyncio import AsyncIOMotorClient
-
-# If you have a 'get_db' utility in utils, import it:
-# from utils.db import get_db
-
-# MongoDB URI should be set via environment variables
-import os
+from models.player import Player
+from config.regions import REGIONS
 
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 db = mongo_client["demon_slayer_rpg"]
 players_col = db["players"]
 
-# Example: regions could be loaded from a JSON/config or separate data module
-REGIONS = {
-    "Mount Natagumo": {
-        "lore": "A web-shrouded forest infamous for its deadly silk.",
-        "demons": ["Rui", "Spider Demon"],
-        "loot": ["Spider Silk", "Moonstone", "Health Elixir"],
-        "events": [
-            "A Kasugai crow delivers a secret message.",
-            "You discover an ancient, web-choked shrine."
-        ]
-    },
-    # Expand with additional regions
-}
-
-# Weighted exploration outcome probabilities
-OUTCOMES = [
-    ("demon", 0.3),
-    ("loot", 0.25),
-    ("event", 0.2),
-    ("nothing", 0.25),
-]
-def weighted_outcome():
-    names, weights = zip(*OUTCOMES)
-    return random.choices(names, weights)[0]
-
-# --- Main Explore Handler ---
+# We assume combat module has start_combat async function accepting post-combat callback
+from handlers import combat  # adjust if your path differs
 
 async def explore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    # Retrieve player (assume 'user_id' is the Mongo key)
-    player = await players_col.find_one({"user_id": user_id})
-    if not player:
-        await update.message.reply_text("You are not registered! Use /start to join the Demon Slayer Corps.")
+    player_doc = await players_col.find_one({"telegram_id": user_id})
+    if not player_doc:
+        await update.message.reply_text("You must register before exploring. Use /start.")
         return
 
-    region_name = player.get("region", "Mount Natagumo")
-    region = REGIONS.get(region_name)
+    player = Player.from_dict(player_doc)
+
+    if player.has_explored:
+        await update.message.reply_text("You have already explored here. Travel forward or backward first!")
+        return
+
+    region = REGIONS.get(player.location)
     if not region:
-        await update.message.reply_text("Error: Unknown region. Please contact an admin.")
+        await update.message.reply_text("This location cannot be explored right now. Contact admin.")
         return
 
-    outcome = weighted_outcome()
+    demons = region["encounters"].get("demons", [])
+    if not demons:
+        await update.message.reply_text("You find no enemies here to battle.")
+        await players_col.update_one({"telegram_id": user_id}, {"$set": {"has_explored": True}})
+        return
 
-    if outcome == "demon":
-        demon = random.choice(region["demons"])
+    demon = random.choice(demons)
+    await update.message.reply_text(
+        f"As you explore *{player.location}*, a *{demon}* appears! Prepare for battle.",
+        parse_mode="Markdown"
+    )
+
+    # Mark as explored to prevent repeated explores in the same location/step
+    await players_col.update_one(
+        {"telegram_id": user_id},
+        {"$set": {"has_explored": True}}
+    )
+
+    # Start combat with callback to handle post-combat options
+    await combat.start_combat(update, context, enemy=demon, post_combat_callback=post_combat_conclusion)
+
+
+async def post_combat_conclusion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """To be called by combat system after battle is resolved."""
+
+    user_id = update.effective_user.id
+    player_doc = await players_col.find_one({"telegram_id": user_id})
+    if not player_doc:
+        # Defensive check
+        await update.message.reply_text("Player data lost. Please start again.")
+        return
+    player = Player.from_dict(player_doc)
+
+    # Determine available directions
+    # If player is on a route, show forward/backward buttons for that route
+    if player.current_route:
+        route_name = player.current_route
+        steps = None
+        if route_name in context.bot_data.get("routes", {}):
+            steps = context.bot_data["routes"][route_name]["steps"]
+        else:
+            # fallback, import routes config for safety
+            from config.routes import ROUTES
+            steps = ROUTES.get(route_name, {}).get("steps", 0)
+
+        progress = player.path_progress
+        buttons = []
+
+        # Backward button if can go back
+        if progress > 0:
+            buttons.append(
+                InlineKeyboardButton("⬅️ Backward", callback_data=f"travel::{route_name}::backward")
+            )
+        # Forward button if not at end
+        if progress < steps:
+            buttons.append(
+                InlineKeyboardButton("➡️ Forward", callback_data=f"travel::{route_name}::forward")
+            )
+
+        if not buttons:
+            # No moves possible: maybe player is stuck, but handle gracefully
+            await update.message.reply_text(
+                f"You stand your ground at {player.location}. No apparent path forward or backward."
+            )
+            return
+
+        keyboard = InlineKeyboardMarkup([buttons])
         await update.message.reply_text(
-            f"As you move through {region_name}, a {demon} appears, blocking your path!"
-        )
-        # Combat handler integration (adjust import as needed)
-        from handlers import combat
-        await combat.start_combat(update, context, enemy=demon)
-    elif outcome == "loot":
-        loot = random.choice(region["loot"])
-        await players_col.update_one(
-            {"user_id": user_id},
-            {"$push": {"inventory": loot}}
-        )
-        await update.message.reply_text(
-            f"You found a hidden stash: {loot} added to your inventory!"
-        )
-    elif outcome == "event":
-        event_text = random.choice(region["events"])
-        await update.message.reply_text(
-            f"Event: {event_text}"
+            "The battle is over. Which way will you go next?",
+            reply_markup=keyboard
         )
     else:
+        # Not on a route but in a main region - suggest travel normally
+        current_region = REGIONS.get(player.location)
+        if not current_region:
+            await update.message.reply_text("Location invalid. Contact admin.")
+            return
+        
+        destinations = current_region.get("connected_routes", [])
+        buttons = [InlineKeyboardButton(dest, callback_data=f"travel::{dest}") for dest in destinations]
+        
+        keyboard = InlineKeyboardMarkup([[button] for button in buttons])
         await update.message.reply_text(
-            "You wander in suspense... nothing happens, but the forest feels alive."
+            "The battle is over. Where to next?",
+            reply_markup=keyboard
         )
-
-# --- Optional: Add Command Handler Registration Helper ---
 
 def get_explore_handler():
     from telegram.ext import CommandHandler
